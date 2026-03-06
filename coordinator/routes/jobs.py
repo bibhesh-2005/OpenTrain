@@ -116,7 +116,7 @@ def create_job(
     job_type: str = Form(...),
     chunk_size: int = Form(default=100),
     data_format: str = Form(default="text"),
-    config: str = Form(default=None),
+    config: str = Form(default="{}"),
     db: Session = Depends(get_db)
 ):
     """
@@ -128,8 +128,14 @@ def create_job(
     # Read file content
     dataset_text = file.file.read().decode('utf-8')
     
-    # Parse config
-    job_config = json.loads(config) if config else {}
+    # Parse config — handle empty strings and None gracefully
+    if not config or not config.strip():
+        job_config = {}
+    else:
+        try:
+            job_config = json.loads(config)
+        except (json.JSONDecodeError, ValueError):
+            job_config = {}
     
     if data_format == "csv":
         # Parse CSV data
