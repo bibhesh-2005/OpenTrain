@@ -20,9 +20,38 @@ from schemas import JobCreate, JobResponse, JobDetail, TaskSummary
 router = APIRouter(prefix="/jobs", tags=["jobs"])
 
 MAX_DATASET_LINES = 50_000  # guard against huge uploads in MVP
+TEXT_BASED_JOBS = {"embedding", "sentiment", "tokenize", "preprocess"}
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
+
+def _extract_text_from_dict(item: dict) -> str:
+    """
+    Extract text from a dict for text-based jobs.
+    Priority: "text" field → first string-valued field → JSON stringify.
+    """
+    if isinstance(item, str):
+        return item
+    if not isinstance(item, dict):
+        return str(item)
+    
+    # Try "text" field first
+    if "text" in item and isinstance(item["text"], str):
+        return item["text"]
+    
+    # Try "content", "message", "input" fields
+    for key in ["content", "message", "input", "data", "value"]:
+        if key in item and isinstance(item[key], str):
+            return item[key]
+    
+    # Fall back to first string-valued field
+    for value in item.values():
+        if isinstance(value, str):
+            return value
+    
+    # Last resort: stringify the whole dict
+    return json.dumps(item)
+
 
 def _shard_dataset(lines: List[str], chunk_size: int) -> List[List[str]]:
     """Split a list of lines into chunks of at most chunk_size."""
@@ -166,6 +195,10 @@ def create_job(
             payloads = json.loads(shard)
         else:
             payloads = shard if isinstance(shard, list) else shard.split('\n') if job_type == "stats" else [shard]
+
+        # For text-based jobs with structured data, extract text from dicts
+        if job_type in TEXT_BASED_JOBS and data_format in ("csv", "json"):
+            payloads = [_extract_text_from_dict(item) for item in payloads]
 
         payload = json.dumps({"data": payloads, "config": {"job_type": job_type, **job_config}})
         task = Task(

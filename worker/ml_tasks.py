@@ -19,6 +19,46 @@ _sentiment_model = None
 _zero_shot_model = None
 
 
+# ─── Helper: Extract text from payload data ────────────────────────────────────
+
+def _extract_texts(data: list) -> list[str]:
+    """
+    Convert payload data to a list of strings.
+    Handles both List[str] and List[dict] formats.
+    
+    For dicts, tries to extract text from known fields:
+    "text" → "content" → "message" → first string field → stringify
+    """
+    if not data:
+        return []
+    
+    result = []
+    for item in data:
+        if isinstance(item, str):
+            result.append(item)
+        elif isinstance(item, dict):
+            # Priority: "text" field → "content" → "message" → first string field
+            text = None
+            for key in ["text", "content", "message", "input", "data", "value"]:
+                if key in item and isinstance(item[key], str):
+                    text = item[key]
+                    break
+            # Fall back to first string-valued field
+            if text is None:
+                for value in item.values():
+                    if isinstance(value, str):
+                        text = value
+                        break
+            # Last resort: stringify
+            if text is None:
+                text = json.dumps(item) if item else ""
+            result.append(text)
+        else:
+            result.append(str(item))
+    
+    return result
+
+
 # ─── Embedding ────────────────────────────────────────────────────────────────
 
 def run_embedding(payload: dict) -> dict:
@@ -27,13 +67,15 @@ def run_embedding(payload: dict) -> dict:
 
     Input payload:
         {"data": ["text 1", "text 2", ...], "config": {"job_type": "embedding", "model": "small"}}
+        OR
+        {"data": [{"text": "...", ...}, {"text": "...", ...}], "config": {...}}
 
     Output:
         {"embeddings": [[0.1, 0.2, ...], ...]}   # one vector per input text
     """
     global _embedding_model
 
-    texts = payload.get("data", [])
+    texts = _extract_texts(payload.get("data", []))
     if not texts:
         return {"embeddings": []}
 
@@ -55,13 +97,15 @@ def run_sentiment(payload: dict) -> dict:
 
     Input payload:
         {"data": ["This is great!", "I hate this.", ...], "config": {"job_type": "sentiment"}}
+        OR
+        {"data": [{"text": "...", ...}, {"text": "...", ...}], "config": {...}}
 
     Output:
         {"sentiments": [{"text": "...", "label": "positive", "score": 0.95}, ...]}
     """
     global _sentiment_model
 
-    texts = payload.get("data", [])
+    texts = _extract_texts(payload.get("data", []))
     if not texts:
         return {"sentiments": []}
 
@@ -94,6 +138,8 @@ def run_stats(payload: dict) -> dict:
 
     Input payload:
         {"data": ["text 1", "text 2", ...], "config": {"job_type": "stats"}}
+        OR
+        {"data": [{"text": "...", ...}, ...], "config": {...}}
 
     Output:
         {
@@ -111,7 +157,7 @@ def run_stats(payload: dict) -> dict:
             }
         }
     """
-    texts = payload.get("data", [])
+    texts = _extract_texts(payload.get("data", []))
     if not texts:
         return {"stats": {}}
 
@@ -170,11 +216,13 @@ def run_tokenize(payload: dict) -> dict:
 
     Input payload:
         {"data": ["hello world", ...], "config": {...}}
+        OR
+        {"data": [{"text": "...", ...}, ...], "config": {...}}
 
     Output:
         {"output": [["hello", "world"], ...]}
     """
-    texts = payload.get("data", [])
+    texts = _extract_texts(payload.get("data", []))
     tokenized = [text.split() for text in texts]
     return {"output": tokenized}
 
@@ -188,11 +236,13 @@ def run_preprocess(payload: dict) -> dict:
 
     Input payload:
         {"data": ["  Hello World  ", ...], "config": {...}}
+        OR
+        {"data": [{"text": "...", ...}, ...], "config": {...}}
 
     Output:
         {"output": ["hello world", ...]}
     """
-    texts = payload.get("data", [])
+    texts = _extract_texts(payload.get("data", []))
     cleaned = [text.strip().lower() for text in texts]
     return {"output": cleaned}
 
