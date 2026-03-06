@@ -4,7 +4,7 @@ Kept separate from SQLAlchemy models for clean separation of concerns.
 """
 from __future__ import annotations
 from datetime import datetime, timezone
-from typing import Optional, List
+from typing import Optional, List, Any
 from pydantic import BaseModel, Field, field_serializer
 
 
@@ -83,7 +83,7 @@ class TaskAssignment(BaseModel):
 
 class TaskResult(BaseModel):
     worker_id: str
-    result: str    # JSON string — worker serialises its output
+    result: Any    # JSON string or parsed data (for backward compatibility)
     checksum: str  # SHA-256 of the result for integrity verification
 
 

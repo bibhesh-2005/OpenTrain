@@ -102,7 +102,10 @@ def submit_result(task_id: str, body: TaskResult, db: Session = Depends(get_db))
         )
 
     # Checksum validation
-    result_data = json.loads(body.result)
+    if isinstance(body.result, str):
+        result_data = json.loads(body.result)
+    else:
+        result_data = body.result
     computed = hashlib.sha256(
         json.dumps(result_data, sort_keys=True).encode()
     ).hexdigest()
@@ -114,7 +117,7 @@ def submit_result(task_id: str, body: TaskResult, db: Session = Depends(get_db))
 
     # Mark task complete
     task.status = "completed"
-    task.result = body.result
+    task.result = json.dumps(result_data)
     task.completed_at = datetime.utcnow()
 
     # Update worker

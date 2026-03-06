@@ -9,7 +9,7 @@ import io
 from datetime import datetime
 from typing import List
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy.orm import Session
 
@@ -82,19 +82,29 @@ def _job_to_response(job: Job) -> JobResponse:
 # ─── Routes ───────────────────────────────────────────────────────────────────
 
 @router.post("/", response_model=JobResponse, status_code=201)
-def create_job(body: JobCreate, db: Session = Depends(get_db)):
+def create_job(
+    file: UploadFile = File(...),
+    job_type: str = Form(...),
+    chunk_size: int = Form(default=100),
+    data_format: str = Form(default="text"),
+    config: str = Form(default=None),
+    db: Session = Depends(get_db)
+):
     """
-    Submit a new ML job.
+    Submit a new ML job by uploading a file.
 
     The dataset is split into shards of `chunk_size` lines/rows, each shard
     becomes a Task record in the database with status=pending.
     """
-    # Parse and validate dataset
-    job_config = body.config or {}
+    # Read file content
+    dataset_text = file.file.read().decode('utf-8')
     
-    if body.data_format == "csv":
+    # Parse config
+    job_config = json.loads(config) if config else {}
+    
+    if data_format == "csv":
         # Parse CSV data
-        rows = _parse_csv_data(body.dataset_text)
+        rows = _parse_csv_data(dataset_text)
         if not rows:
             raise HTTPException(status_code=400, detail="CSV is empty.")
         if len(rows) > MAX_DATASET_LINES:
@@ -103,17 +113,17 @@ def create_job(body: JobCreate, db: Session = Depends(get_db)):
                 detail=f"Dataset too large: {len(rows)} rows (max {MAX_DATASET_LINES}).",
             )
         # Convert rows to text representation for stats task
-        if body.job_type == "stats":
+        if job_type == "stats":
             # For stats, reconstruct CSV format
-            lines = [body.dataset_text.split('\n')[0]]  # header
+            lines = [dataset_text.split('\n')[0]]  # header
             lines.extend([json.dumps(row) for row in rows])
         else:
             lines = [json.dumps(row) for row in rows]
-        shards = _shard_dataset(lines, body.chunk_size)
+        shards = _shard_dataset(lines, chunk_size)
         
-    elif body.data_format == "json":
+    elif data_format == "json":
         # Parse JSON data
-        data = _parse_json_data(body.dataset_text)
+        data = _parse_json_data(dataset_text)
         if not data:
             raise HTTPException(status_code=400, detail="JSON is empty.")
         if len(data) > MAX_DATASET_LINES:
@@ -121,10 +131,10 @@ def create_job(body: JobCreate, db: Session = Depends(get_db)):
                 status_code=400,
                 detail=f"Dataset too large: {len(data)} items (max {MAX_DATASET_LINES}).",
             )
-        shards = _shard_structured_data(data, body.chunk_size)
+        shards = _shard_structured_data(data, chunk_size)
         
     else:  # text format (default)
-        lines = [l.strip() for l in body.dataset_text.splitlines() if l.strip()]
+        lines = [l.strip() for l in dataset_text.splitlines() if l.strip()]
         if not lines:
             raise HTTPException(status_code=400, detail="Dataset is empty — no non-blank lines found.")
         if len(lines) > MAX_DATASET_LINES:
@@ -132,16 +142,16 @@ def create_job(body: JobCreate, db: Session = Depends(get_db)):
                 status_code=400,
                 detail=f"Dataset too large: {len(lines)} lines (max {MAX_DATASET_LINES}).",
             )
-        shards = _shard_dataset(lines, body.chunk_size)
+        shards = _shard_dataset(lines, chunk_size)
 
     # Create job
     job = Job(
         id=new_uuid(),
         status="in_progress",
-        job_type=body.job_type,
-        dataset_text=body.dataset_text[:1000],  # Store first 1000 chars for reference
-        chunk_size=body.chunk_size,
-        data_format=body.data_format,
+        job_type=job_type,
+        dataset_text=dataset_text[:1000],  # Store first 1000 chars for reference
+        chunk_size=chunk_size,
+        data_format=data_format,
         config=json.dumps(job_config) if job_config else None,
         created_at=datetime.utcnow(),
     )
@@ -150,14 +160,14 @@ def create_job(body: JobCreate, db: Session = Depends(get_db)):
 
     # Shard dataset → Tasks
     for idx, shard in enumerate(shards):
-        if body.data_format in ("csv", "json"):
+        if data_format in ("csv", "json"):
             payloads = json.loads(shard)
             if not isinstance(payloads, list):
                 payloads = [payloads]
         else:
-            payloads = shard if isinstance(shard, list) else shard.split('\n') if body.job_type == "stats" else [shard]
+            payloads = shard if isinstance(shard, list) else shard.split('\n') if job_type == "stats" else [shard]
 
-        payload = json.dumps({"data": payloads, "config": {"job_type": body.job_type, **job_config}})
+        payload = json.dumps({"data": payloads, "config": {"job_type": job_type, **job_config}})
         task = Task(
             id=new_uuid(),
             job_id=job.id,

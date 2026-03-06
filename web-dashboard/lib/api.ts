@@ -71,7 +71,7 @@ export interface ResultSummary {
 
 export interface JobCreate {
   job_type: string;
-  dataset_text: string;
+  file: File;
   chunk_size: number;
   data_format?: string;
   config?: Record<string, any>;
@@ -81,7 +81,7 @@ export interface JobCreate {
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
-    headers: { "Content-Type": "application/json", ...init?.headers },
+    headers: init?.body instanceof FormData ? {} : { "Content-Type": "application/json", ...init?.headers },
     ...init,
   });
   if (!res.ok) {
@@ -97,7 +97,15 @@ export const api = {
   jobs: {
     list:          ()                   => request<Job[]>("/jobs"),
     get:           (id: string)         => request<JobDetail>(`/jobs/${id}`),
-    create:        (body: JobCreate)    => request<Job>("/jobs", { method: "POST", body: JSON.stringify(body) }),
+    create:        (body: JobCreate) => {
+      const formData = new FormData();
+      formData.append('file', body.file);
+      formData.append('job_type', body.job_type);
+      formData.append('chunk_size', body.chunk_size.toString());
+      formData.append('data_format', body.data_format || 'text');
+      formData.append('config', JSON.stringify(body.config || {}));
+      return request<Job>("/jobs", { method: "POST", body: formData });
+    },
     resultSummary: (id: string)         => request<ResultSummary>(`/jobs/${id}/result/summary`),
     downloadUrl:   (id: string)         => `${BASE}/jobs/${id}/result`,
   },
