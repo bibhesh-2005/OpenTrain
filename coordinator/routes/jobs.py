@@ -78,13 +78,20 @@ def _payload_checksum(data: List[str] | str) -> str:
 
 def _parse_csv_data(csv_text: str) -> List[dict]:
     """Parse CSV text into list of dicts."""
+    if not csv_text or not csv_text.strip():
+        return []
     reader = csv.DictReader(io.StringIO(csv_text))
-    return list(reader)
+    return list(reader) if reader else []
 
 
 def _parse_json_data(json_text: str) -> List[dict]:
     """Parse JSON text into list of dicts."""
-    data = json.loads(json_text)
+    if not json_text or not json_text.strip():
+        return []
+    try:
+        data = json.loads(json_text)
+    except (json.JSONDecodeError, ValueError):
+        raise ValueError("Invalid JSON format")
     if isinstance(data, dict):
         return [data]
     elif isinstance(data, list):
@@ -125,8 +132,14 @@ def create_job(
     The dataset is split into shards of `chunk_size` lines/rows, each shard
     becomes a Task record in the database with status=pending.
     """
-    # Read file content
-    dataset_text = file.file.read().decode('utf-8')
+    # Read and validate file content
+    try:
+        dataset_text = file.file.read().decode('utf-8')
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Failed to read file: {str(e)}")
+    
+    if not dataset_text or not dataset_text.strip():
+        raise HTTPException(status_code=400, detail="Uploaded file is empty")
     
     # Parse config — handle empty strings and None gracefully
     if not config or not config.strip():
@@ -195,12 +208,36 @@ def create_job(
 
     # Shard dataset → Tasks
     for idx, shard in enumerate(shards):
-        if data_format == "csv":
-            payloads = [json.loads(item) for item in shard]
-        elif data_format == "json":
-            payloads = json.loads(shard)
-        else:
-            payloads = shard if isinstance(shard, list) else shard.split('\n') if job_type == "stats" else [shard]
+        try:
+            if data_format == "csv":
+                # shard is a list of JSON-stringified dicts
+                payloads = []
+                for item in shard:
+                    if not item or not item.strip():
+                        continue
+                    try:
+                        payloads.append(json.loads(item))
+                    except (json.JSONDecodeError, ValueError) as e:
+                        print(f"[jobs] Warning: Skipping malformed JSON in CSV shard {idx}: {e}")
+                        continue
+                if not payloads:
+                    raise HTTPException(status_code=400, detail=f"CSV shard {idx} has no valid rows")
+            elif data_format == "json":
+                # shard is a JSON string (array of dicts)
+                if not shard or not shard.strip():
+                    raise HTTPException(status_code=400, detail=f"JSON shard {idx} is empty")
+                try:
+                    payloads = json.loads(shard)
+                except (json.JSONDecodeError, ValueError) as e:
+                    raise HTTPException(status_code=400, detail=f"JSON shard {idx} is malformed: {str(e)}")
+                if not isinstance(payloads, list):
+                    payloads = [payloads]
+            else:
+                # text format
+                payloads = shard if isinstance(shard, list) else shard.split('\n') if job_type == "stats" else [shard]
+        except Exception as e:
+            print(f"[jobs] Error processing shard {idx}: {e}")
+            raise
 
         # For text-based jobs with structured data, extract text from dicts
         if job_type in TEXT_BASED_JOBS and data_format in ("csv", "json"):
