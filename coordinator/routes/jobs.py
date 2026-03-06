@@ -4,6 +4,8 @@ Jobs router — handles job submission, sharding, status, and result download.
 import hashlib
 import json
 import os
+import csv
+import io
 from datetime import datetime
 from typing import List
 
@@ -27,10 +29,39 @@ def _shard_dataset(lines: List[str], chunk_size: int) -> List[List[str]]:
     return [lines[i : i + chunk_size] for i in range(0, len(lines), chunk_size)]
 
 
-def _payload_checksum(data: List[str]) -> str:
+def _shard_structured_data(data: List[dict], chunk_size: int) -> List[str]:
+    """Shard structured data and return as JSON payloads."""
+    shards = []
+    for i in range(0, len(data), chunk_size):
+        shard = data[i : i + chunk_size]
+        shards.append(json.dumps(shard))
+    return shards
+
+
+def _payload_checksum(data: List[str] | str) -> str:
     """SHA-256 of the JSON-serialised shard, used for integrity verification."""
-    raw = json.dumps(data, ensure_ascii=False).encode()
+    if isinstance(data, str):
+        raw = data.encode()
+    else:
+        raw = json.dumps(data, ensure_ascii=False).encode()
     return hashlib.sha256(raw).hexdigest()
+
+
+def _parse_csv_data(csv_text: str) -> List[dict]:
+    """Parse CSV text into list of dicts."""
+    reader = csv.DictReader(io.StringIO(csv_text))
+    return list(reader)
+
+
+def _parse_json_data(json_text: str) -> List[dict]:
+    """Parse JSON text into list of dicts."""
+    data = json.loads(json_text)
+    if isinstance(data, dict):
+        return [data]
+    elif isinstance(data, list):
+        return data
+    else:
+        raise ValueError("JSON must be an object or array")
 
 
 def _job_to_response(job: Job) -> JobResponse:
@@ -55,42 +86,85 @@ def create_job(body: JobCreate, db: Session = Depends(get_db)):
     """
     Submit a new ML job.
 
-    The dataset is split into shards of `chunk_size` lines, each shard
+    The dataset is split into shards of `chunk_size` lines/rows, each shard
     becomes a Task record in the database with status=pending.
     """
     # Parse and validate dataset
-    lines = [l.strip() for l in body.dataset_text.splitlines() if l.strip()]
-    if not lines:
-        raise HTTPException(status_code=400, detail="Dataset is empty — no non-blank lines found.")
-    if len(lines) > MAX_DATASET_LINES:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Dataset too large: {len(lines)} lines (max {MAX_DATASET_LINES}).",
-        )
+    job_config = body.config or {}
+    
+    if body.data_format == "csv":
+        # Parse CSV data
+        rows = _parse_csv_data(body.dataset_text)
+        if not rows:
+            raise HTTPException(status_code=400, detail="CSV is empty.")
+        if len(rows) > MAX_DATASET_LINES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Dataset too large: {len(rows)} rows (max {MAX_DATASET_LINES}).",
+            )
+        # Convert rows to text representation for stats task
+        if body.job_type == "stats":
+            # For stats, reconstruct CSV format
+            lines = [body.dataset_text.split('\n')[0]]  # header
+            lines.extend([json.dumps(row) for row in rows])
+        else:
+            lines = [json.dumps(row) for row in rows]
+        shards = _shard_dataset(lines, body.chunk_size)
+        
+    elif body.data_format == "json":
+        # Parse JSON data
+        data = _parse_json_data(body.dataset_text)
+        if not data:
+            raise HTTPException(status_code=400, detail="JSON is empty.")
+        if len(data) > MAX_DATASET_LINES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Dataset too large: {len(data)} items (max {MAX_DATASET_LINES}).",
+            )
+        shards = _shard_structured_data(data, body.chunk_size)
+        
+    else:  # text format (default)
+        lines = [l.strip() for l in body.dataset_text.splitlines() if l.strip()]
+        if not lines:
+            raise HTTPException(status_code=400, detail="Dataset is empty — no non-blank lines found.")
+        if len(lines) > MAX_DATASET_LINES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Dataset too large: {len(lines)} lines (max {MAX_DATASET_LINES}).",
+            )
+        shards = _shard_dataset(lines, body.chunk_size)
 
     # Create job
     job = Job(
         id=new_uuid(),
         status="in_progress",
         job_type=body.job_type,
-        dataset_text=body.dataset_text,
+        dataset_text=body.dataset_text[:1000],  # Store first 1000 chars for reference
         chunk_size=body.chunk_size,
+        data_format=body.data_format,
+        config=json.dumps(job_config) if job_config else None,
         created_at=datetime.utcnow(),
     )
     db.add(job)
     db.flush()  # get job.id without committing
 
     # Shard dataset → Tasks
-    shards = _shard_dataset(lines, body.chunk_size)
     for idx, shard in enumerate(shards):
-        payload = json.dumps({"data": shard, "config": {"job_type": body.job_type}})
+        if body.data_format in ("csv", "json"):
+            payloads = json.loads(shard)
+            if not isinstance(payloads, list):
+                payloads = [payloads]
+        else:
+            payloads = shard if isinstance(shard, list) else shard.split('\n') if body.job_type == "stats" else [shard]
+
+        payload = json.dumps({"data": payloads, "config": {"job_type": body.job_type, **job_config}})
         task = Task(
             id=new_uuid(),
             job_id=job.id,
             task_index=idx,
             status="pending",
             payload=payload,
-            checksum=_payload_checksum(shard),
+            checksum=_payload_checksum(payload),
             attempts=0,
         )
         db.add(task)

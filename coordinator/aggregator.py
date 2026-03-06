@@ -15,6 +15,7 @@ import os
 import tempfile
 import threading
 from datetime import datetime
+from collections import Counter
 
 from sqlalchemy.orm import Session
 
@@ -111,7 +112,21 @@ def _aggregate(job_id: str, db: Session) -> bool:
 
 # ─── Merge strategies ─────────────────────────────────────────────────────────
 
-def _merge_results(job_type: str, tasks: list) -> tuple[list, dict]:
+def _merge_results(job_type: str, tasks: list) -> tuple[dict | list, dict]:
+    """
+    Merge task results based on job type.
+    Returns (merged_result, stats_dict).
+    """
+    if job_type == "stats":
+        return _merge_stats(tasks)
+    elif job_type == "sentiment":
+        return _merge_sentiment(tasks)
+    else:
+        return _merge_standard(job_type, tasks)
+
+
+def _merge_standard(job_type: str, tasks: list) -> tuple[list, dict]:
+    """Standard merge: concatenate output arrays."""
     merged = []
     for task in tasks:
         if not task.result:
@@ -125,6 +140,115 @@ def _merge_results(job_type: str, tasks: list) -> tuple[list, dict]:
             items = [{"task_index": task.task_index, "data": data}]
         merged.extend(items)
     return merged, {"total_items": len(merged)}
+
+
+def _merge_sentiment(tasks: list) -> tuple[list, dict]:
+    """Merge sentiment results with aggregated statistics."""
+    merged = []
+    positive_count = 0
+    negative_count = 0
+    neutral_count = 0
+    scores = []
+
+    for task in tasks:
+        if not task.result:
+            continue
+        data = json.loads(task.result)
+        sentiments = data.get("sentiments", [])
+
+        for sentiment in sentiments:
+            merged.append(sentiment)
+            label = sentiment.get("label", "").lower()
+            score = sentiment.get("score", 0)
+
+            if label == "positive":
+                positive_count += 1
+            elif label == "negative":
+                negative_count += 1
+            else:
+                neutral_count += 1
+
+            if label != "error":
+                scores.append(score)
+
+    # Create aggregated result
+    total = len(merged)
+    avg_score = sum(scores) / len(scores) if scores else 0
+
+    return {
+        "results": merged,
+        "summary": {
+            "total_documents": total,
+            "positive_count": positive_count,
+            "negative_count": negative_count,
+            "neutral_count": neutral_count,
+            "avg_confidence": round(avg_score, 4),
+            "positive_pct": round((positive_count / total * 100), 2) if total > 0 else 0,
+            "negative_pct": round((negative_count / total * 100), 2) if total > 0 else 0,
+            "neutral_pct": round((neutral_count / total * 100), 2) if total > 0 else 0,
+        }
+    }, {"total_items": total}
+
+
+def _merge_stats(tasks: list) -> tuple[dict, dict]:
+    """Merge statistical analysis results across shards."""
+    all_stats = []
+
+    for task in tasks:
+        if not task.result:
+            continue
+        data = json.loads(task.result)
+        stats = data.get("stats", {})
+        if stats:
+            all_stats.append(stats)
+
+    if not all_stats:
+        return {"error": "No statistics to merge"}, {"total_items": 0}
+
+    # Aggregate statistics across all shards
+    merged_stats = {
+        "total_texts": sum(s.get("total_texts", 0) for s in all_stats),
+        "total_words": sum(s.get("total_words", 0) for s in all_stats),
+        "unique_words": len(set(
+            w for s in all_stats 
+            for w in (s.get("top_10_words", []) if isinstance(s.get("top_10_words"), list) else [])
+        )),  # Rough estimate from top words
+        "avg_document_length": round(
+            sum(s.get("total_texts", 0) * s.get("avg_length", 0) for s in all_stats) / 
+            max(sum(s.get("total_texts", 0) for s in all_stats), 1),
+            2
+        ),
+        "avg_words_per_document": round(
+            sum(s.get("total_texts", 0) * s.get("avg_words", 0) for s in all_stats) / 
+            max(sum(s.get("total_texts", 0) for s in all_stats), 1),
+            2
+        ),
+        "overall_vocabulary_richness": round(
+            sum(s.get("total_words", 0) for s in all_stats) /
+            max(sum(s.get("total_texts", 0) for s in all_stats), 1),
+            4
+        ),
+        "min_length": min(s.get("min_length", float('inf')) for s in all_stats) if all_stats else 0,
+        "max_length": max(s.get("max_length", 0) for s in all_stats) if all_stats else 0,
+    }
+
+    # Aggregate top words and bigrams
+    from collections import Counter
+    word_counts = Counter()
+    bigram_counts = Counter()
+
+    for s in all_stats:
+        if isinstance(s.get("top_10_words"), list):
+            for word, count in s.get("top_10_words", []):
+                word_counts[word] += count
+        if isinstance(s.get("top_10_bigrams"), list):
+            for bigram, count in s.get("top_10_bigrams", []):
+                bigram_counts[bigram] += count
+
+    merged_stats["top_20_words"] = word_counts.most_common(20)
+    merged_stats["top_20_bigrams"] = bigram_counts.most_common(20)
+
+    return {"stats": merged_stats}, {"total_items": sum(s.get("total_texts", 0) for s in all_stats)}
 
 
 # ─── Artifact helpers ─────────────────────────────────────────────────────────

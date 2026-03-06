@@ -11,9 +11,11 @@ from pydantic import BaseModel, Field, field_serializer
 # ─── Job schemas ──────────────────────────────────────────────────────────────
 
 class JobCreate(BaseModel):
-    job_type: str = Field(..., description="embedding | tokenize | preprocess")
-    dataset_text: str = Field(..., description="Raw text dataset, one item per line")
-    chunk_size: int = Field(default=100, ge=1, le=5000, description="Lines per task shard")
+    job_type: str = Field(..., description="embedding | tokenize | preprocess | sentiment | stats")
+    dataset_text: str = Field(..., description="Raw text dataset, one item per line, or CSV/JSON structure")
+    chunk_size: int = Field(default=100, ge=1, le=5000, description="Lines/rows per task shard")
+    data_format: str = Field(default="text", description="text | csv | json")
+    config: Optional[dict] = Field(default=None, description="Task-specific config (model choice, columns, etc.)")
 
 
 class TaskSummary(BaseModel):

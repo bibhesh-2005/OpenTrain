@@ -73,6 +73,8 @@ export interface JobCreate {
   job_type: string;
   dataset_text: string;
   chunk_size: number;
+  data_format?: string;
+  config?: Record<string, any>;
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────

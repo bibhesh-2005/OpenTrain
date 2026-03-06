@@ -54,6 +54,8 @@ class Job(Base):
     job_type     = Column(String, nullable=False)
     dataset_text = Column(Text, nullable=True)
     chunk_size   = Column(Integer, default=100)
+    data_format  = Column(String, default="text")         # text | csv | json
+    config       = Column(Text, nullable=True)            # JSON config string for task options
     total_tasks  = Column(Integer, default=0)
     done_tasks   = Column(Integer, default=0)
     created_at   = Column(DateTime, default=datetime.utcnow)
